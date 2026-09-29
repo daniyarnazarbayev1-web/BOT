@@ -8,7 +8,7 @@ import re
 import socket
 import threading
 import time
-from flask import Flask, request, render_template_string, redirect, url_for
+from flask import Flask, request, render_template_string
 import requests
 from groq import Groq, RateLimitError
 from telethon import TelegramClient, events
@@ -505,4 +505,12 @@ def run_telethon():
     if config_data["api_id"] and config_data["api_hash"]:
         init_clients()
         bot_loop.run_until_complete(client.connect())
-        if bot_loop.run_until_complete(client.is_user_authorize
+        if bot_loop.run_until_complete(client.is_user_authorized()):
+            print("Сессия найдена. Бот запускается...")
+            config_data["configured"] = True
+            register_telegram_handlers()
+            start_bot_tasks()
+    bot_loop.run_forever()
+
+threading.Thread(target=run_telethon, daemon=True).start()
+run_flask()
