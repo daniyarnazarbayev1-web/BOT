@@ -14,10 +14,6 @@ from groq import Groq, RateLimitError
 from telethon import TelegramClient, events
 
 # ==================== КОНФИГУРАЦИЯ БЕЗ ТОКЕНОВ ====================
-# Токены берутся из переменных окружения (если есть), либо вводятся через веб-сайт.
-# В самом коде секретные ключи НЕ хранятся.
-# ==================================================================
-
 MODEL_NAME = "qwen/qwen3.8-27b"
 COOLDOWN_SECONDS = 10
 last_message_time = 0
@@ -42,7 +38,6 @@ SYSTEM_PROMPT = """Ты — реальный человек, участник э
 6. Ты НЕ бот и НЕ ИИ.
 7. СТРОГО ЗАПРЕЩЕНО использовать символ @ и юзернеймы."""
 
-# Хранилище настроек и состояния авторизации в памяти
 config_data = {
     "api_id": int(os.getenv("API_ID", "0")),
     "api_hash": os.getenv("API_HASH", ""),
@@ -53,7 +48,6 @@ config_data = {
 
 login_data = {}
 
-# ----------------- ВЕБ-СЕРВЕР Flask -----------------
 app = Flask(__name__)
 
 HTML_FORM = """
@@ -108,7 +102,7 @@ HTML_FORM = """
         {% elif step == 'phone' %}
         <h3>Шаг 2: Ввод номера телефона</h3>
         <form method="POST" action="/send_phone">
-            <label>Номер телефона Telegram:</label>
+            <label>Номер телефона Telegram (в международном формате):</label>
             <input type="text" name="phone" placeholder="+79991112233" required>
             <button type="submit">Запросить код подтверждения</button>
         </form>
@@ -143,7 +137,8 @@ def init_clients():
     if config_data["groq_key"]:
         groq_client = Groq(api_key=config_data["groq_key"])
     if config_data["api_id"] and config_data["api_hash"]:
-        client = TelegramClient("user_session", config_data["api_id"], config_data["api_hash"])
+        if client is None:
+            client = TelegramClient("user_session", config_data["api_id"], config_data["api_hash"], loop=bot_loop)
 
 @app.route("/")
 def index():
@@ -177,12 +172,14 @@ def send_phone():
     login_data['phone'] = phone
     
     async def _send():
-        await client.connect()
+        if not client.is_connected():
+            await client.connect()
         res = await client.send_code_request(phone)
-        login_data['phone_code_hash'] = res.phone_code_hash
+        return res.phone_code_hash
 
     try:
-        asyncio.run_coroutine_threadsafe(_send(), bot_loop).result()
+        future = asyncio.run_coroutine_threadsafe(_send(), bot_loop)
+        login_data['phone_code_hash'] = future.result(timeout=15)
         return render_template_string(HTML_FORM, step='code', status="Код подтверждения отправлен в Telegram!", config=config_data)
     except Exception as e:
         return render_template_string(HTML_FORM, step='phone', error=f"Ошибка отправки кода: {e}", config=config_data)
@@ -193,16 +190,22 @@ def send_code():
     password = request.form.get("password", "").strip()
 
     async def _login():
+        if not client.is_connected():
+            await client.connect()
         try:
             await client.sign_in(phone=login_data['phone'], code=code, phone_code_hash=login_data.get('phone_code_hash'))
         except Exception as e:
-            if "Two-steps verification" in str(e) and password:
-                await client.sign_in(password=password)
+            if "Two-steps verification" in str(e) or "password" in str(e).lower():
+                if password:
+                    await client.sign_in(password=password)
+                else:
+                    raise Exception("Требуется облачный пароль 2FA!")
             else:
                 raise e
 
     try:
-        asyncio.run_coroutine_threadsafe(_login(), bot_loop).result()
+        future = asyncio.run_coroutine_threadsafe(_login(), bot_loop)
+        future.result(timeout=20)
         register_telegram_handlers()
         start_bot_tasks()
         return render_template_string(HTML_FORM, step='done', status="Авторизация прошла успешно! Бот запущен.", config=config_data)
