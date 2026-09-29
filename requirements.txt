@@ -1,0 +1,4 @@
+telethon
+groq
+requests
+flask
