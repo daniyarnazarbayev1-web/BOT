@@ -8,12 +8,13 @@ import re
 import socket
 import threading
 import time
-from flask import Flask, request, render_template_string
+from flask import Flask, render_template_string
 import requests
 from groq import Groq, RateLimitError
 from telethon import TelegramClient, events
+from telethon.sessions import StringSession
 
-# ==================== КОНФИГУРАЦИЯ БЕЗ ТОКЕНОВ ====================
+# ==================== КОНФИГУРАЦИЯ ИЗ ENVIRONMENT VARIABLES ====================
 MODEL_NAME = "qwen/qwen3.8-27b"
 COOLDOWN_SECONDS = 10
 last_message_time = 0
@@ -23,7 +24,6 @@ is_sleeping = False
 is_offline = False
 
 HISTORY_FILE = "HISTORY.txt"
-SESSION_FILE = "user_session.session"
 
 user_memory = {}
 user_pending_queue = {}
@@ -38,91 +38,38 @@ SYSTEM_PROMPT = """Ты — реальный человек, участник э
 6. Ты НЕ бот и НЕ ИИ.
 7. СТРОГО ЗАПРЕЩЕНО использовать символ @ и юзернеймы."""
 
-config_data = {
-    "api_id": int(os.getenv("API_ID", "0")),
-    "api_hash": os.getenv("API_HASH", ""),
-    "groq_key": os.getenv("GROQ_API_KEY", ""),
-    "chat_id": int(os.getenv("CHAT_ID", "0")),
-    "configured": False
-}
-
-login_data = {}
+# Чтение ключей напрямую из переменных окружения Render
+API_ID = int(os.getenv("API_ID", "0"))
+API_HASH = os.getenv("API_HASH", "").strip()
+GROQ_API_KEY = os.getenv("GROQ_API_KEY", "").strip()
+CHAT_ID = int(os.getenv("CHAT_ID", "0"))
+SESSION_STRING = os.getenv("SESSION_STRING", "").strip()
 
 app = Flask(__name__)
 
-HTML_FORM = """
+HTML_STATUS = """
 <!DOCTYPE html>
-<html>
+<html lang="ru">
 <head>
     <meta charset="utf-8">
-    <title>Настройка и Авторизация Telegram</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Статус Сервера</title>
     <style>
-        body { font-family: system-ui, -apple-system, sans-serif; display: flex; justify-content: center; align-items: center; min-height: 100vh; background: #121212; color: #e0e0e0; margin: 0; }
-        .card { background: #1e1e1e; padding: 30px; border-radius: 12px; width: 380px; text-align: center; box-shadow: 0 8px 24px rgba(0,0,0,0.6); }
-        h2 { margin-top: 0; color: #fff; }
-        h3 { color: #aaa; font-weight: normal; margin-bottom: 20px; }
-        label { display: block; text-align: left; font-size: 12px; margin-top: 10px; color: #bbb; }
-        input, button { width: 100%; padding: 12px; margin: 6px 0 12px 0; box-sizing: border-box; border-radius: 6px; border: 1px solid #333; background: #2a2a2a; color: white; font-size: 14px; }
-        input:focus { border-color: #0088cc; outline: none; }
-        button { background: #0088cc; color: white; font-weight: bold; cursor: pointer; border: none; margin-top: 15px; transition: background 0.2s; }
-        button:hover { background: #0077b3; }
-        .status { background: #1b3a24; color: #4CAF50; padding: 10px; border-radius: 6px; margin-bottom: 15px; font-size: 13px; }
-        .error { background: #3a1b1b; color: #f44336; padding: 10px; border-radius: 6px; margin-bottom: 15px; font-size: 13px; }
+        body { font-family: system-ui, -apple-system, sans-serif; display: flex; justify-content: center; align-items: center; min-height: 100vh; background: #0f172a; color: #f8fafc; margin: 0; }
+        .card { background: #1e293b; padding: 32px; border-radius: 16px; width: 360px; text-align: center; box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.3); }
+        h2 { margin-top: 0; font-size: 1.5rem; color: #fff; }
+        p { color: #94a3b8; font-size: 0.95rem; line-height: 1.5; }
+        .status-badge { display: inline-flex; align-items: center; gap: 8px; padding: 8px 16px; background: #166534; color: #4ade80; border-radius: 9999px; font-weight: 600; font-size: 0.875rem; margin-top: 12px; }
+        .dot { width: 8px; height: 8px; background-color: #22c55e; border-radius: 50%; }
     </style>
 </head>
 <body>
     <div class="card">
-        <h2>Панель управления</h2>
-        
-        {% if status %}
-            <div class="status">{{ status }}</div>
-        {% endif %}
-        {% if error %}
-            <div class="error">{{ error }}</div>
-        {% endif %}
-        
-        {% if step == 'tokens' %}
-        <h3>Шаг 1: Ввод ключей и токенов</h3>
-        <form method="POST" action="/save_tokens">
-            <label>API ID (Telegram):</label>
-            <input type="number" name="api_id" placeholder="34787451" value="{{ config.api_id if config.api_id else '' }}" required>
-            
-            <label>API Hash (Telegram):</label>
-            <input type="text" name="api_hash" placeholder="840b6dfd030f..." value="{{ config.api_hash }}" required>
-            
-            <label>Groq API Key:</label>
-            <input type="password" name="groq_key" placeholder="gsk_..." value="{{ config.groq_key }}" required>
-            
-            <label>Chat ID Telegram:</label>
-            <input type="number" name="chat_id" placeholder="-1002094465456" value="{{ config.chat_id if config.chat_id else '' }}" required>
-            
-            <button type="submit">Сохранить и продолжить</button>
-        </form>
-        
-        {% elif step == 'phone' %}
-        <h3>Шаг 2: Ввод номера телефона</h3>
-        <form method="POST" action="/send_phone">
-            <label>Номер телефона Telegram (в международном формате):</label>
-            <input type="text" name="phone" placeholder="+79991112233" required>
-            <button type="submit">Запросить код подтверждения</button>
-        </form>
-        
-        {% elif step == 'code' %}
-        <h3>Шаг 3: Авторизация</h3>
-        <form method="POST" action="/send_code">
-            <label>Код из Telegram:</label>
-            <input type="text" name="code" placeholder="12345" required>
-            
-            <label>Облачный пароль 2FA (если есть):</label>
-            <input type="password" name="password" placeholder="Оставьте пустым, если нет">
-            
-            <button type="submit">Войти и запустить бота</button>
-        </form>
-        
-        {% elif step == 'done' %}
-        <h3>Успешно!</h3>
-        <p style="color: #bbb; font-size: 14px;">Бот успешно авторизован, токены применены. Сессия активна.</p>
-        {% endif %}
+        <h2>Userbot Dashboard</h2>
+        <p>Сервер активен, Telegram Userbot запущен и принимает обновления.</p>
+        <div class="status-badge">
+            <span class="dot"></span> ONLINE
+        </div>
     </div>
 </body>
 </html>
@@ -132,91 +79,13 @@ groq_client = None
 client = None
 bot_loop = asyncio.new_event_loop()
 
-def init_clients():
-    global groq_client, client
-    if config_data["groq_key"]:
-        groq_client = Groq(api_key=config_data["groq_key"])
-    if config_data["api_id"] and config_data["api_hash"]:
-        if client is None:
-            client = TelegramClient("user_session", config_data["api_id"], config_data["api_hash"], loop=bot_loop)
-
-@app.route("/")
+@app.route("/", methods=["GET", "HEAD"])
 def index():
-    if os.path.exists(SESSION_FILE) and config_data["configured"]:
-        return render_template_string(HTML_FORM, step='done', status="Бот запущен и работает!", config=config_data)
-    
-    if not config_data["configured"]:
-        return render_template_string(HTML_FORM, step='tokens', status="", config=config_data)
-        
-    step = 'code' if 'phone_code_hash' in login_data else 'phone'
-    return render_template_string(HTML_FORM, step=step, status="", config=config_data)
+    """Эндпоинт для UptimeRobot и отображения статуса"""
+    return render_template_string(HTML_STATUS), 200
 
-@app.route("/save_tokens", methods=["POST"])
-def save_tokens():
-    try:
-        config_data["api_id"] = int(request.form.get("api_id", 0))
-        config_data["api_hash"] = request.form.get("api_hash", "").strip()
-        config_data["groq_key"] = request.form.get("groq_key", "").strip()
-        config_data["chat_id"] = int(request.form.get("chat_id", 0))
-        
-        config_data["configured"] = True
-        init_clients()
-        
-        return render_template_string(HTML_FORM, step='phone', status="Токены успешно сохранены. Введите номер телефона.", config=config_data)
-    except Exception as e:
-        return render_template_string(HTML_FORM, step='tokens', error=f"Ошибка в данных: {e}", config=config_data)
+# ----------------- ВСПАМОГАТЕЛЬНЫЕ ФУНКЦИИ И ЛОГИКА -----------------
 
-@app.route("/send_phone", methods=["POST"])
-def send_phone():
-    phone = request.form.get("phone", "").strip()
-    login_data['phone'] = phone
-    
-    async def _send():
-        if not client.is_connected():
-            await client.connect()
-        res = await client.send_code_request(phone)
-        return res.phone_code_hash
-
-    try:
-        future = asyncio.run_coroutine_threadsafe(_send(), bot_loop)
-        login_data['phone_code_hash'] = future.result(timeout=15)
-        return render_template_string(HTML_FORM, step='code', status="Код подтверждения отправлен в Telegram!", config=config_data)
-    except Exception as e:
-        return render_template_string(HTML_FORM, step='phone', error=f"Ошибка отправки кода: {e}", config=config_data)
-
-@app.route("/send_code", methods=["POST"])
-def send_code():
-    code = request.form.get("code", "").strip()
-    password = request.form.get("password", "").strip()
-
-    async def _login():
-        if not client.is_connected():
-            await client.connect()
-        try:
-            await client.sign_in(phone=login_data['phone'], code=code, phone_code_hash=login_data.get('phone_code_hash'))
-        except Exception as e:
-            if "Two-steps verification" in str(e) or "password" in str(e).lower():
-                if password:
-                    await client.sign_in(password=password)
-                else:
-                    raise Exception("Требуется облачный пароль 2FA!")
-            else:
-                raise e
-
-    try:
-        future = asyncio.run_coroutine_threadsafe(_login(), bot_loop)
-        future.result(timeout=20)
-        register_telegram_handlers()
-        start_bot_tasks()
-        return render_template_string(HTML_FORM, step='done', status="Авторизация прошла успешно! Бот запущен.", config=config_data)
-    except Exception as e:
-        return render_template_string(HTML_FORM, step='code', error=f"Ошибка входа: {e}", config=config_data)
-
-def run_flask():
-    port = int(os.getenv("PORT", 8080))
-    app.run(host="0.0.0.0", port=port)
-
-# ----------------- ОСНОВНАЯ ЛОГИКА БОТА -----------------
 def check_internet() -> bool:
     try:
         socket.create_connection(("8.8.8.8", 53), timeout=3)
@@ -236,9 +105,10 @@ async def internet_monitor_loop():
             is_offline = False
             print("[СЕТЬ] Интернет появился.")
             try:
-                await client.send_message(config_data["chat_id"], "всем привет, у меня инета не было")
+                if client and CHAT_ID:
+                    await client.send_message(CHAT_ID, "всем привет, у меня инета не было")
             except Exception as e:
-                print(f"Ошибка отправки: {e}")
+                print(f"Ошибка отправки сообщения о сети: {e}")
 
 def clean_text(text: str) -> str:
     if not text:
@@ -269,20 +139,25 @@ async def trigger_sleep_mode():
     is_sleeping = True
     print("[ЛИМИТЫ] Сон на 3 часа.")
     try:
-        await client.send_message(config_data["chat_id"], "Чет спать хочу, я спать, всем пока.")
+        if client and CHAT_ID:
+            await client.send_message(CHAT_ID, "Чет спать хочу, я спать, всем пока.")
     except Exception as e:
         print(f"Ошибка отправки: {e}")
 
     await asyncio.sleep(SLEEP_DURATION)
 
     try:
-        await client.send_message(config_data["chat_id"], "ух.. хорошо поспал.. всем привет.")
+        if client and CHAT_ID:
+            await client.send_message(CHAT_ID, "ух.. хорошо поспал.. всем привет.")
     except Exception as e:
         print(f"Ошибка отправки: {e}")
 
     is_sleeping = False
 
 def analyze_image_with_qwen(image_bytes: bytes, caption_text: str = "") -> tuple[str, bool]:
+    if not groq_client:
+        return "", False
+
     base64_image = encode_image_to_base64(image_bytes)
     user_content = [
         {"type": "text", "text": caption_text if caption_text else "Прокомментируй это изображение коротко и естественно."},
@@ -345,6 +220,9 @@ def log_to_file(user_id: int, username: str, role: str, text: str):
         pass
 
 def get_ai_response(user_id: int, combined_text: str) -> tuple[str, bool]:
+    if not groq_client:
+        return "", False
+
     cleanup_inactive_users()
 
     if user_id not in user_memory:
@@ -378,7 +256,7 @@ def get_ai_response(user_id: int, combined_text: str) -> tuple[str, bool]:
     except RateLimitError:
         return "", True
     except Exception as e:
-        print(f"Ошибка запроса к API: {e}")
+        print(f"Ошибка запроса к API Groq: {e}")
         return "", False
 
     return "", False
@@ -395,13 +273,12 @@ async def send_split_messages(event, full_text: str):
                 await event.client.send_message(event.chat_id, chunk)
 
 async def autonomous_chat_initiator():
-    await client.wait_until_ready()
     while True:
         await asyncio.sleep(random.randint(1800, 3600))
-        if is_sleeping or is_offline:
+        if is_sleeping or is_offline or not client or not CHAT_ID:
             continue
         try:
-            messages = await client.get_messages(config_data["chat_id"], limit=5)
+            messages = await client.get_messages(CHAT_ID, limit=5)
             chat_context = [f"Участник: {msg.text}" for msg in reversed(messages) if msg.text]
             if not chat_context:
                 continue
@@ -415,15 +292,18 @@ async def autonomous_chat_initiator():
             if ai_reply:
                 chunks = split_into_chunks(ai_reply)
                 for chunk in chunks:
-                    async with client.action(config_data["chat_id"], "typing"):
+                    async with client.action(CHAT_ID, "typing"):
                         await asyncio.sleep(random.uniform(2.0, 4.0))
-                        await client.send_message(config_data["chat_id"], chunk)
+                        await client.send_message(CHAT_ID, chunk)
                 log_to_file(0, "autonomous", "Bot_Initiative", ai_reply)
         except Exception as e:
             print(f"Ошибка фонового цикла: {e}")
 
 def register_telegram_handlers():
-    @client.on(events.NewMessage(chats=config_data["chat_id"]))
+    if not client or not CHAT_ID:
+        return
+
+    @client.on(events.NewMessage(chats=CHAT_ID))
     async def handle_message(event):
         global last_message_time
         if event.out or is_sleeping or is_offline:
@@ -498,22 +378,47 @@ def register_telegram_handlers():
                 log_to_file(user_id, username, "Bot", ai_reply)
                 await send_split_messages(event, ai_reply)
 
-# ----------------- ЗАПУСК -----------------
+# ----------------- СТАРТ И ИНИЦИАЛИЗАЦИЯ -----------------
+
 def start_bot_tasks():
     bot_loop.create_task(autonomous_chat_initiator())
     bot_loop.create_task(internet_monitor_loop())
 
-def run_telethon():
-    asyncio.set_event_loop(bot_loop)
-    if config_data["api_id"] and config_data["api_hash"]:
-        init_clients()
-        bot_loop.run_until_complete(client.connect())
-        if bot_loop.run_until_complete(client.is_user_authorized()):
-            print("Сессия найдена. Бот запускается...")
-            config_data["configured"] = True
+def run_flask():
+    port = int(os.getenv("PORT", 8080))
+    app.run(host="0.0.0.0", port=port, use_reloader=False)
+
+async def main():
+    global client, groq_client
+
+    if GROQ_API_KEY:
+        groq_client = Groq(api_key=GROQ_API_KEY)
+
+    if API_ID and API_HASH and SESSION_STRING:
+        print("[ИНФО] Подключение юзербота через StringSession...")
+        client = TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH, loop=bot_loop)
+        await client.connect()
+        
+        if await client.is_user_authorized():
+            print("[УСПЕХ] Юзербот успешно авторизован!")
             register_telegram_handlers()
             start_bot_tasks()
-    bot_loop.run_forever()
+        else:
+            print("[ОШИБКА] Указанная SESSION_STRING недействительна.")
+    else:
+        print("[ВНИМАНИЕ] Переменные окружения (API_ID, API_HASH, SESSION_STRING) не заполнены в Render!")
 
-threading.Thread(target=run_telethon, daemon=True).start()
-run_flask()
+    # Запуск Flask в фоновом потоке
+    flask_thread = threading.Thread(target=run_flask, daemon=True)
+    flask_thread.start()
+
+    # Удержание асинхронного цикла активным
+    while True:
+        await asyncio.sleep(3600)
+
+if __name__ == "__main__":
+    asyncio.set_event_loop(bot_loop)
+    try:
+        bot_loop.run_until_complete(main())
+    except KeyboardInterrupt:
+        print("Бот остановлен.")
