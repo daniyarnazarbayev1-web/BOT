@@ -15,9 +15,13 @@ from telethon import TelegramClient, events
 from telethon.sessions import StringSession
 
 # ==================== КОНФИГУРАЦИЯ ИЗ ENVIRONMENT VARIABLES ====================
-MODEL_NAME = "qwen/qwen3.8-27b"
+MODEL_NAME = "openai/gpt-oss-120b"
 COOLDOWN_SECONDS = 10
+MAX_HISTORY_LIMIT = 15  # Лимит сообщений в памяти на одного юзера
 last_message_time = 0
+
+# Словарь для отслеживания времени последнего запроса КАЖДОГО пользователя
+user_last_message_time = {}
 
 SLEEP_DURATION = 10800 
 is_sleeping = False
@@ -28,15 +32,16 @@ HISTORY_FILE = "HISTORY.txt"
 user_memory = {}
 user_pending_queue = {}
 
-SYSTEM_PROMPT = """Ты — реальный человек, участник этого Telegram-чата.
+SYSTEM_PROMPT = """Тебя зовут Кащей Якуб. Тебя создал Мокото Копырус.
+Ты — реальный человек, участник этого Telegram-чата.
 ПРАВИЛА ОБЩЕНИЯ:
-1. Отвечай всегда прямо и завершенно. Никаких обрывок, недосказанностей и технических пометок.
-2. Общайся естественно, без шаблонов, формализма, сервисного тона ("чем помочь", "пиши если что") и заученных фраз.
-3. К КАЖДОМУ пользователю у тебя формируется СВОЕ уникальное отношение на основе его сообщений.
-4. Пиши живым языком обычного человека: коротко и емко (1-3 предложения). Не пиши длинных пластов текста.
-5. Если тебе прислали фото, коротко прокомментируй его в обычном разговорном стиле.
-6. Ты НЕ бот и НЕ ИИ.
-7. СТРОГО ЗАПРЕЩЕНО использовать символ @ и юзернеймы."""
+1. Отвечай прямо, коротко и завершено (1-2 предложения).
+2. Твой стиль: остроумный, сухой, саркастичный и реалистичный, как у живого человека.
+3. Ты помнишь факты и детали о собеседнике из предыдущих сообщений.
+4. СТРОГО ЗАПРЕЩЕНО использовать эмодзи. Вообще никаких эмодзи.
+5. СТРОГО ЗАПРЕЩЕНО использовать символ @, юзернеймы, сервисный тон и формальные приветствия.
+6. СТРОГО ЗАПРЕЩЕНО упоминать или реагировать на любые игровые команды вроде ".рулетка".
+7. Если прислали фото, коротко и остроумно прокомментируй его."""
 
 # Чтение ключей напрямую из переменных окружения Render
 API_ID = int(os.getenv("API_ID", "0"))
@@ -84,7 +89,7 @@ def index():
     """Эндпоинт для UptimeRobot и отображения статуса"""
     return render_template_string(HTML_STATUS), 200
 
-# ----------------- ВСПАМОГАТЕЛЬНЫЕ ФУНКЦИИ И ЛОГИКА -----------------
+# ----------------- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ И ЛОГИКА -----------------
 
 def check_internet() -> bool:
     try:
@@ -115,6 +120,8 @@ def clean_text(text: str) -> str:
         return ""
     text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL)
     text = re.sub(r'\S*@\S*', '', text)
+    # Фильтрация упоминаний рулетки
+    text = re.sub(r'\.рулетка', '', text, flags=re.IGNORECASE)
     return re.sub(r'\s+', ' ', text).strip()
 
 def encode_image_to_base64(image_bytes: bytes) -> str:
@@ -232,8 +239,10 @@ def get_ai_response(user_id: int, combined_text: str) -> tuple[str, bool]:
     history = user_memory[user_id]["messages"]
 
     temp_history = history + [{"role": "user", "content": combined_text}]
-    if len(temp_history) > 10:
-        temp_history = temp_history[-10:]
+    
+    # Ограничение по лимиту памяти: если превышает MAX_HISTORY_LIMIT, старые сообщения удаляются
+    if len(temp_history) > MAX_HISTORY_LIMIT:
+        temp_history = temp_history[-MAX_HISTORY_LIMIT:]
 
     messages = [{"role": "system", "content": SYSTEM_PROMPT}] + temp_history
 
@@ -250,7 +259,9 @@ def get_ai_response(user_id: int, combined_text: str) -> tuple[str, bool]:
         if final_reply:
             history.append({"role": "user", "content": combined_text})
             history.append({"role": "assistant", "content": final_reply})
-            user_memory[user_id]["messages"] = history[-10:]
+            
+            # Сохранение с учётом жесткого лимита памяти
+            user_memory[user_id]["messages"] = history[-MAX_HISTORY_LIMIT:]
             return final_reply, False
 
     except RateLimitError:
@@ -279,7 +290,7 @@ async def autonomous_chat_initiator():
             continue
         try:
             messages = await client.get_messages(CHAT_ID, limit=5)
-            chat_context = [f"Участник: {msg.text}" for msg in reversed(messages) if msg.text]
+            chat_context = [f"Участник: {msg.text}" for msg in reversed(messages) if msg.text and not msg.text.startswith(".рулетка")]
             if not chat_context:
                 continue
 
@@ -305,7 +316,7 @@ def register_telegram_handlers():
 
     @client.on(events.NewMessage(chats=CHAT_ID))
     async def handle_message(event):
-        global last_message_time
+        global last_message_time, user_last_message_time
         if event.out or is_sleeping or is_offline:
             return
 
@@ -317,6 +328,10 @@ def register_telegram_handlers():
         username = getattr(sender, "username", "") or ""
         text = event.text or ""
         has_photo = bool(event.photo)
+
+        # Полный игнор любых команд с рулеткой
+        if ".рулетка" in text.lower():
+            return
 
         if not text and not has_photo:
             return
@@ -333,8 +348,19 @@ def register_telegram_handlers():
         is_mentioned = me.username and f"@{me.username}" in text
         should_respond = is_reply_to_me or is_mentioned or (random.random() < 0.12)
 
-        await asyncio.sleep(2.5)
         current_time = time.time()
+
+        # Проверка лимита в 10 секунд ДЛЯ КОНКРЕТНОГО ПОЛЬЗОВАТЕЛЯ
+        if should_respond:
+            last_user_time = user_last_message_time.get(user_id, 0)
+            if current_time - last_user_time < COOLDOWN_SECONDS:
+                await event.reply("Подожди, я занят.")
+                return
+
+            # Обновляем время отправки от пользователя
+            user_last_message_time[user_id] = current_time
+
+        await asyncio.sleep(2.5)
 
         if should_respond and (current_time - last_message_time >= COOLDOWN_SECONDS or is_reply_to_me or is_mentioned):
             last_message_time = time.time()
