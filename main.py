@@ -40,7 +40,7 @@ SYSTEM_PROMPT = """Тебя зовут Кащей Якуб. Тебя созда�
 3. Ты помнишь факты и детали о собеседнике из предыдущих сообщений.
 4. СТРОГО ЗАПРЕЩЕНО использовать эмодзи. Вообще никаких эмодзи.
 5. СТРОГО ЗАПРЕЩЕНО использовать символ @, юзернеймы, сервисный тон и формальные приветствия.
-6. СТРОГО ЗАПРЕЩЕНО упоминать или реагировать на любые игровые команды вроде ".рулетка".
+6. СТРОГО ЗАПРЕЩЕНО использовать, генерировать, повторять или упоминать любые игровые команды (вроде .рулетка, /рулетка, !рулетка, ферма, дуэль и т.д.), а также любые web-ссылки.
 7. Если прислали фото, коротко и остроумно прокомментируй его."""
 
 # Чтение ключей напрямую из переменных окружения Render
@@ -115,14 +115,37 @@ async def internet_monitor_loop():
             except Exception as e:
                 print(f"Ошибка отправки сообщения о сети: {e}")
 
+def has_forbidden_content(text: str) -> bool:
+    """Проверка сгенерированного текста на запрещенный контент (ссылки, команды Ирис-бота и др.)"""
+    if not text:
+        return False
+    
+    # 1. Проверка на ссылки (URL, t.me, доменные имена)
+    url_pattern = r'(https?://\S+|www\.\S+|\bt\.me/\S+|\b[a-zA-Z0-9.-]+\.(?:ru|com|net|org|io|me|site|xyz|online|app)\b)'
+    if re.search(url_pattern, text, flags=re.IGNORECASE):
+        return True
+        
+    # 2. Проверка на игровые команды Iris и прочих ботов (.рулетка, /рулетка, !рулетка, рулетка)
+    iris_pattern = r'[\.\/!─\+–\-]?\s*(рулетка|кубик|дуэль|казино|ферма|варн|бан|кик|мута|сейф|мешок)'
+    if re.search(iris_pattern, text, flags=re.IGNORECASE):
+        return True
+
+    return False
+
 def clean_text(text: str) -> str:
     if not text:
         return ""
     text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL)
     text = re.sub(r'\S*@\S*', '', text)
-    # Фильтрация упоминаний рулетки
-    text = re.sub(r'\.рулетка', '', text, flags=re.IGNORECASE)
+    # Защита от случайного срабатывания команд Iris: удаление префиксов ., /, ! перед словами
+    text = re.sub(r'(?<=\s|^)[\./!─\+–\-](?=\w)', '', text)
     return re.sub(r'\s+', ' ', text).strip()
+
+def process_generated_text(text: str) -> str:
+    """Функция проверки ответа. Если есть запрещенный контент — подменяет на оскорбление."""
+    if has_forbidden_content(text):
+        return "Соси хуй чмырь"
+    return clean_text(text)
 
 def encode_image_to_base64(image_bytes: bytes) -> str:
     return base64.b64encode(image_bytes).decode('utf-8')
@@ -181,7 +204,8 @@ def analyze_image_with_qwen(image_bytes: bytes, caption_text: str = "") -> tuple
             temperature=0.7,
             max_tokens=250,
         )
-        return clean_text(completion.choices[0].message.content or ""), False
+        raw_reply = completion.choices[0].message.content or ""
+        return process_generated_text(raw_reply), False
     except RateLimitError:
         return "", True
     except Exception as e:
@@ -254,7 +278,9 @@ def get_ai_response(user_id: int, combined_text: str) -> tuple[str, bool]:
             max_tokens=250,
         )
         raw_reply = completion.choices[0].message.content or ""
-        final_reply = clean_text(raw_reply)
+        
+        # Проверка и очистка сгенерированного ответа
+        final_reply = process_generated_text(raw_reply)
 
         if final_reply:
             history.append({"role": "user", "content": combined_text})
@@ -290,7 +316,11 @@ async def autonomous_chat_initiator():
             continue
         try:
             messages = await client.get_messages(CHAT_ID, limit=5)
-            chat_context = [f"Участник: {msg.text}" for msg in reversed(messages) if msg.text and not msg.text.startswith(".рулетка")]
+            # Игнорируем в контексте любые сообщения с командами
+            chat_context = [
+                f"Участник: {msg.text}" for msg in reversed(messages) 
+                if msg.text and not has_forbidden_content(msg.text)
+            ]
             if not chat_context:
                 continue
 
@@ -329,8 +359,8 @@ def register_telegram_handlers():
         text = event.text or ""
         has_photo = bool(event.photo)
 
-        # Полный игнор любых команд с рулеткой
-        if ".рулетка" in text.lower():
+        # Полный игнор любых команд с рулеткой и прочими игровыми триггерами от участников
+        if has_forbidden_content(text):
             return
 
         if not text and not has_photo:
