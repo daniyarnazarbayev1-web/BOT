@@ -43,7 +43,6 @@ SYSTEM_PROMPT = """Тебя зовут Кащей Якуб. Тебя созда�
 6. СТРОГО ЗАПРЕЩЕНО генерировать, повторять или упоминать любые игровые команды (вроде .рулетка, /рулетка, !рулетка), а также любые web-ссылки.
 7. Если прислали фото, коротко и остроумно прокомментируй его."""
 
-# Чтение ключей напрямую из переменных окружения Render
 API_ID = int(os.getenv("API_ID", "0"))
 API_HASH = os.getenv("API_HASH", "").strip()
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "").strip()
@@ -86,7 +85,6 @@ bot_loop = asyncio.new_event_loop()
 
 @app.route("/", methods=["GET", "HEAD"])
 def index():
-    """Эндпоинт для UptimeRobot и отображения статуса"""
     return render_template_string(HTML_STATUS), 200
 
 # ----------------- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ И ЛОГИКА -----------------
@@ -116,17 +114,17 @@ async def internet_monitor_loop():
                 print(f"Ошибка отправки сообщения о сети: {e}")
 
 def has_forbidden_content(text: str) -> bool:
-    """Проверка СГЕНЕРИРОВАННОГО ответа бота на наличие ссылок или команд рулетки/Ириса"""
+    """Проверяет сгенерированный текст на ссылки и команды рулетки/Ириса"""
     if not text:
         return False
     
-    # 1. Проверка на кликабельные ссылки и домены
+    # 1. Ссылки и домены
     url_pattern = r'(https?://\S+|www\.\S+|\bt\.me/\S+|\b[a-zA-Z0-9.-]+\.(?:ru|com|net|org|io|me|site|xyz|online|app)\b)'
     if re.search(url_pattern, text, flags=re.IGNORECASE):
         return True
         
-    # 2. Проверка на команды рулетки и системные команды Iris (с явными префиксами или полными словами)
-    iris_cmd_pattern = r'(?:[\.\/!─\+–\-]\s*|\b)(рулетка|дуэль|казино|ферма|бан|кик|мута|варн)\b'
+    # 2. Игровые команды Iris (.рулетка, /рулетка, рулетка и т.д.)
+    iris_cmd_pattern = r'(?:[\.\/!─\+–\-]\s*|\b)рулетка\b'
     if re.search(iris_cmd_pattern, text, flags=re.IGNORECASE):
         return True
 
@@ -137,12 +135,12 @@ def clean_text(text: str) -> str:
         return ""
     text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL)
     text = re.sub(r'\S*@\S*', '', text)
-    # Вырезаем случайно сгенерированные значки команд перед словами, чтобы Iris не принял ответ за команду
+    # Удаляем значки команд перед словами, чтобы Iris не воспринимал текст как команду
     text = re.sub(r'(?<=\s|^)[\./!─\+–\-](?=\w)', '', text)
     return re.sub(r'\s+', ' ', text).strip()
 
 def process_generated_text(text: str) -> str:
-    """Проверка ответа нейросети перед отправкой в чат"""
+    """Если бот сгенерил запрещенку или рулетку — отправляется 'Соси хуй чмырь'"""
     if has_forbidden_content(text):
         return "Соси хуй чмырь"
     return clean_text(text)
@@ -278,7 +276,6 @@ def get_ai_response(user_id: int, combined_text: str) -> tuple[str, bool]:
         )
         raw_reply = completion.choices[0].message.content or ""
         
-        # Обработка сгенерированного ответа
         final_reply = process_generated_text(raw_reply)
 
         if final_reply:
@@ -300,7 +297,7 @@ async def send_split_messages(event, full_text: str):
     chunks = split_into_chunks(full_text)
     for i, chunk in enumerate(chunks):
         async with event.client.action(event.chat_id, "typing"):
-            typing_delay = max(1.8, min(len(chunk) * 0.06 + random.uniform(0.5, 1.5), 6.0))
+            typing_delay = max(1.5, min(len(chunk) * 0.05 + random.uniform(0.5, 1.2), 5.0))
             await asyncio.sleep(typing_delay)
             if i == 0:
                 await event.reply(chunk)
@@ -314,7 +311,6 @@ async def autonomous_chat_initiator():
             continue
         try:
             messages = await client.get_messages(CHAT_ID, limit=5)
-            # Фильтруем входящий контекст от игровых команд
             chat_context = [
                 f"Участник: {msg.text}" for msg in reversed(messages) 
                 if msg.text and not re.search(r'[\.\/!─\+–\-]?\s*рулетка', msg.text, re.IGNORECASE)
@@ -349,15 +345,15 @@ def register_telegram_handlers():
             return
 
         sender = await event.get_sender()
-        if not sender:
+        user_id = sender.id if sender else event.sender_id
+        if not user_id:
             return
 
-        user_id = sender.id
         username = getattr(sender, "username", "") or ""
         text = event.text or ""
         has_photo = bool(event.photo)
 
-        # Игнорируем только прямые попытки вызвать рулетку в сообщении юзера
+        # Полный игнор байтов на рулетку от участников
         if re.search(r'[\.\/!─\+–\-]?\s*рулетка', text, flags=re.IGNORECASE):
             return
 
@@ -374,63 +370,66 @@ def register_telegram_handlers():
                 is_reply_to_me = True
 
         is_mentioned = me.username and f"@{me.username}" in text
-        should_respond = is_reply_to_me or is_mentioned or (random.random() < 0.12)
+        # Логика работы в группе: отвечает на реплаи, упоминания или с 15% шансом на обычные сообщения
+        should_respond = is_reply_to_me or is_mentioned or (random.random() < 0.15)
+
+        if not should_respond:
+            return
 
         current_time = time.time()
 
-        # Проверка лимита в 10 секунд ДЛЯ КОНКРЕТНОГО ПОЛЬЗОВАТЕЛЯ
-        if should_respond:
-            last_user_time = user_last_message_time.get(user_id, 0)
-            if current_time - last_user_time < COOLDOWN_SECONDS:
+        # Кулдаун 10 сек для отдельного юзера
+        last_user_time = user_last_message_time.get(user_id, 0)
+        if current_time - last_user_time < COOLDOWN_SECONDS:
+            if is_reply_to_me or is_mentioned:
                 await event.reply("Подожди, я занят.")
-                return
+            return
 
-            # Обновляем время отправки от пользователя
-            user_last_message_time[user_id] = current_time
+        user_last_message_time[user_id] = current_time
 
-        await asyncio.sleep(2.5)
+        if current_time - last_message_time < 3 and not (is_reply_to_me or is_mentioned):
+            return
 
-        if should_respond and (current_time - last_message_time >= COOLDOWN_SECONDS or is_reply_to_me or is_mentioned):
-            last_message_time = time.time()
+        last_message_time = current_time
 
-            if text and any(k in text.lower() for k in ["нарисуй", "сгенерируй", "покажи как выглядит", "нарисуй фото"]):
-                async with event.client.action(event.chat_id, "photo"):
-                    await asyncio.sleep(random.uniform(2.0, 4.0))
-                    img_data = generate_image_pollinations(text)
-                    if img_data:
-                        photo_file = io.BytesIO(img_data)
-                        photo_file.name = "photo.jpg"
-                        await event.reply(file=photo_file)
-                        log_to_file(user_id, username, "Bot", "[GENERATED_IMAGE]")
-                        return
+        if text and any(k in text.lower() for k in ["нарисуй", "сгенерируй", "покажи как выглядит", "нарисуй фото"]):
+            async with event.client.action(event.chat_id, "photo"):
+                await asyncio.sleep(random.uniform(1.5, 3.0))
+                img_data = generate_image_pollinations(text)
+                if img_data:
+                    photo_file = io.BytesIO(img_data)
+                    photo_file.name = "photo.jpg"
+                    await event.reply(file=photo_file)
+                    log_to_file(user_id, username, "Bot", "[GENERATED_IMAGE]")
+                    return
 
-            if has_photo:
-                async with event.client.action(event.chat_id, "typing"):
-                    photo_bytes = await event.download_media(file=bytes)
-                    ai_reply, is_rate_limit = analyze_image_with_qwen(photo_bytes, caption_text=text)
-                    if is_rate_limit:
-                        asyncio.create_task(trigger_sleep_mode())
-                        return
-                    if ai_reply:
-                        await asyncio.sleep(random.uniform(1.5, 3.5))
-                        await event.reply(ai_reply)
-                        log_to_file(user_id, username, "Bot", ai_reply)
-                        return
+        if has_photo:
+            async with event.client.action(event.chat_id, "typing"):
+                photo_bytes = await event.download_media(file=bytes)
+                ai_reply, is_rate_limit = analyze_image_with_qwen(photo_bytes, caption_text=text)
+                if is_rate_limit:
+                    asyncio.create_task(trigger_sleep_mode())
+                    return
+                if ai_reply:
+                    await asyncio.sleep(random.uniform(1.0, 2.5))
+                    await event.reply(ai_reply)
+                    log_to_file(user_id, username, "Bot", ai_reply)
+                    return
 
-            if user_id not in user_pending_queue:
-                user_pending_queue[user_id] = []
-            user_pending_queue[user_id].append(text)
+        if user_id not in user_pending_queue:
+            user_pending_queue[user_id] = []
+        user_pending_queue[user_id].append(text)
 
-            pending_messages = user_pending_queue.pop(user_id, [text])
-            combined_text = "\n".join(pending_messages)
+        pending_messages = user_pending_queue.pop(user_id, [text])
+        combined_text = "\n".join(pending_messages)
 
-            ai_reply, is_rate_limit = get_ai_response(user_id, combined_text)
-            if is_rate_limit:
-                asyncio.create_task(trigger_sleep_mode())
-                return
-            if ai_reply:
-                log_to_file(user_id, username, "Bot", ai_reply)
-                await send_split_messages(event, ai_reply)
+        ai_reply, is_rate_limit = get_ai_response(user_id, combined_text)
+        if is_rate_limit:
+            asyncio.create_task(trigger_sleep_mode())
+            return
+        if ai_reply:
+            log_to_file(user_id, username, "Bot", ai_reply)
+            await send_split_messages(event, ai_reply)
 
 # ----------------- СТАРТ И ИНИЦИАЛИЗАЦИЯ -----------------
 
@@ -449,7 +448,7 @@ async def main():
         groq_client = Groq(api_key=GROQ_API_KEY)
 
     if API_ID and API_HASH and SESSION_STRING:
-        print("[ИНФО] Подключение юзербота через StringSession...")
+        print("[ИНФО] Подключение юзербота в групповой чат через StringSession...")
         client = TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH, loop=bot_loop)
         await client.connect()
         
@@ -462,11 +461,9 @@ async def main():
     else:
         print("[ВНИМАНИЕ] Переменные окружения (API_ID, API_HASH, SESSION_STRING) не заполнены в Render!")
 
-    # Запуск Flask в фоновом потоке
     flask_thread = threading.Thread(target=run_flask, daemon=True)
     flask_thread.start()
 
-    # Удержание асинхронного цикла активным
     while True:
         await asyncio.sleep(3600)
 
