@@ -40,7 +40,7 @@ SYSTEM_PROMPT = """Тебя зовут Кащей Якуб. Тебя созда�
 3. Ты помнишь факты и детали о собеседнике из предыдущих сообщений.
 4. СТРОГО ЗАПРЕЩЕНО использовать эмодзи. Вообще никаких эмодзи.
 5. СТРОГО ЗАПРЕЩЕНО использовать символ @, юзернеймы, сервисный тон и формальные приветствия.
-6. СТРОГО ЗАПРЕЩЕНО использовать, генерировать, повторять или упоминать любые игровые команды (вроде .рулетка, /рулетка, !рулетка, ферма, дуэль и т.д.), а также любые web-ссылки.
+6. СТРОГО ЗАПРЕЩЕНО генерировать, повторять или упоминать любые игровые команды (вроде .рулетка, /рулетка, !рулетка), а также любые web-ссылки.
 7. Если прислали фото, коротко и остроумно прокомментируй его."""
 
 # Чтение ключей напрямую из переменных окружения Render
@@ -116,18 +116,18 @@ async def internet_monitor_loop():
                 print(f"Ошибка отправки сообщения о сети: {e}")
 
 def has_forbidden_content(text: str) -> bool:
-    """Проверка сгенерированного текста на запрещенный контент (ссылки, команды Ирис-бота и др.)"""
+    """Проверка СГЕНЕРИРОВАННОГО ответа бота на наличие ссылок или команд рулетки/Ириса"""
     if not text:
         return False
     
-    # 1. Проверка на ссылки (URL, t.me, доменные имена)
+    # 1. Проверка на кликабельные ссылки и домены
     url_pattern = r'(https?://\S+|www\.\S+|\bt\.me/\S+|\b[a-zA-Z0-9.-]+\.(?:ru|com|net|org|io|me|site|xyz|online|app)\b)'
     if re.search(url_pattern, text, flags=re.IGNORECASE):
         return True
         
-    # 2. Проверка на игровые команды Iris и прочих ботов (.рулетка, /рулетка, !рулетка, рулетка)
-    iris_pattern = r'[\.\/!─\+–\-]?\s*(рулетка|кубик|дуэль|казино|ферма|варн|бан|кик|мута|сейф|мешок)'
-    if re.search(iris_pattern, text, flags=re.IGNORECASE):
+    # 2. Проверка на команды рулетки и системные команды Iris (с явными префиксами или полными словами)
+    iris_cmd_pattern = r'(?:[\.\/!─\+–\-]\s*|\b)(рулетка|дуэль|казино|ферма|бан|кик|мута|варн)\b'
+    if re.search(iris_cmd_pattern, text, flags=re.IGNORECASE):
         return True
 
     return False
@@ -137,12 +137,12 @@ def clean_text(text: str) -> str:
         return ""
     text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL)
     text = re.sub(r'\S*@\S*', '', text)
-    # Защита от случайного срабатывания команд Iris: удаление префиксов ., /, ! перед словами
+    # Вырезаем случайно сгенерированные значки команд перед словами, чтобы Iris не принял ответ за команду
     text = re.sub(r'(?<=\s|^)[\./!─\+–\-](?=\w)', '', text)
     return re.sub(r'\s+', ' ', text).strip()
 
 def process_generated_text(text: str) -> str:
-    """Функция проверки ответа. Если есть запрещенный контент — подменяет на оскорбление."""
+    """Проверка ответа нейросети перед отправкой в чат"""
     if has_forbidden_content(text):
         return "Соси хуй чмырь"
     return clean_text(text)
@@ -264,7 +264,6 @@ def get_ai_response(user_id: int, combined_text: str) -> tuple[str, bool]:
 
     temp_history = history + [{"role": "user", "content": combined_text}]
     
-    # Ограничение по лимиту памяти: если превышает MAX_HISTORY_LIMIT, старые сообщения удаляются
     if len(temp_history) > MAX_HISTORY_LIMIT:
         temp_history = temp_history[-MAX_HISTORY_LIMIT:]
 
@@ -279,14 +278,13 @@ def get_ai_response(user_id: int, combined_text: str) -> tuple[str, bool]:
         )
         raw_reply = completion.choices[0].message.content or ""
         
-        # Проверка и очистка сгенерированного ответа
+        # Обработка сгенерированного ответа
         final_reply = process_generated_text(raw_reply)
 
         if final_reply:
             history.append({"role": "user", "content": combined_text})
             history.append({"role": "assistant", "content": final_reply})
             
-            # Сохранение с учётом жесткого лимита памяти
             user_memory[user_id]["messages"] = history[-MAX_HISTORY_LIMIT:]
             return final_reply, False
 
@@ -316,10 +314,10 @@ async def autonomous_chat_initiator():
             continue
         try:
             messages = await client.get_messages(CHAT_ID, limit=5)
-            # Игнорируем в контексте любые сообщения с командами
+            # Фильтруем входящий контекст от игровых команд
             chat_context = [
                 f"Участник: {msg.text}" for msg in reversed(messages) 
-                if msg.text and not has_forbidden_content(msg.text)
+                if msg.text and not re.search(r'[\.\/!─\+–\-]?\s*рулетка', msg.text, re.IGNORECASE)
             ]
             if not chat_context:
                 continue
@@ -359,8 +357,8 @@ def register_telegram_handlers():
         text = event.text or ""
         has_photo = bool(event.photo)
 
-        # Полный игнор любых команд с рулеткой и прочими игровыми триггерами от участников
-        if has_forbidden_content(text):
+        # Игнорируем только прямые попытки вызвать рулетку в сообщении юзера
+        if re.search(r'[\.\/!─\+–\-]?\s*рулетка', text, flags=re.IGNORECASE):
             return
 
         if not text and not has_photo:
