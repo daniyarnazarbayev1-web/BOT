@@ -16,8 +16,8 @@ from telethon.sessions import StringSession
 
 # ==================== КОНФИГУРАЦИЯ ИЗ ENVIRONMENT VARIABLES ====================
 MODEL_NAME = "openai/gpt-oss-120b"
-COOLDOWN_SECONDS = 10
-MAX_HISTORY_LIMIT = 15  # Лимит сообщений в памяти на одного юзера
+COOLDOWN_SECONDS = 12
+MAX_HISTORY_LIMIT = 10  # Уменьшили лимит контекста для снижения нагрузок
 last_message_time = 0
 
 # Словарь для отслеживания времени последнего запроса КАЖДОГО пользователя
@@ -33,14 +33,14 @@ user_memory = {}
 user_pending_queue = {}
 
 SYSTEM_PROMPT = """Тебя зовут Кащей Якуб. Тебя создал Мокото Копырус.
-Ты — реальный человек, участник этого Telegram-чата.
+Ты — реальный человек, обычный участник этого Telegram-чата.
 ПРАВИЛА ОБЩЕНИЯ:
 1. Отвечай прямо, коротко и завершено (1-2 предложения).
-2. Твой стиль: остроумный, сухой, саркастичный и реалистичный, как у живого человека.
+2. Твой стиль: остроумный, сухой, саркастичный и реалистичный.
 3. Ты помнишь факты и детали о собеседнике из предыдущих сообщений.
-4. СТРОГО ЗАПРЕЩЕНО использовать эмодзи. Вообще никаких эмодзи.
-5. СТРОГО ЗАПРЕЩЕНО использовать символ @, юзернеймы, сервисный тон и формальные приветствия.
-6. СТРОГО ЗАПРЕЩЕНО упоминать или реагировать на любые игровые команды вроде ".рулетка".
+4. СТРОГО ЗАПРЕЩЕНО использовать эмодзи, форматирование, спецсимволы и ссылки.
+5. СТРОГО ЗАПРЕЩЕНО использовать символ @, юзернеймы, сервисный тон.
+6. СТРОГО ЗАПРЕЩЕНО использовать или упоминать любые игровые и админ-команды (рулетка, дуэль, кубы, бан, кик, мут, варн, репорт, общий сбор, передать ириски).
 7. Если прислали фото, коротко и остроумно прокомментируй его."""
 
 # Чтение ключей напрямую из переменных окружения Render
@@ -86,10 +86,19 @@ bot_loop = asyncio.new_event_loop()
 
 @app.route("/", methods=["GET", "HEAD"])
 def index():
-    """Эндпоинт для UptimeRobot и отображения статуса"""
     return render_template_string(HTML_STATUS), 200
 
-# ----------------- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ И ЛОГИКА -----------------
+# ----------------- REGEX ФИЛЬТРЫ БЕЗОПАСНОСТИ IRIS -----------------
+
+# Опасные игровые и системные команды Iris (входные и выходные)
+IRIS_DANGER_PATTERN = re.compile(
+    r"([\.\/!─\+–\-]?\s*("
+    r"рулетка|дуэль|кубы|мины|застрелиться|убиться|самоликвидация|"
+    r"бан|кик|мут|варн|репорт|спам|снять|разжаловать|общий\s+сбор|созвать|"
+    r"передать|голд|ириски|чек|алиасы|настройки"
+    r"))", 
+    re.IGNORECASE
+)
 
 def check_internet() -> bool:
     try:
@@ -109,32 +118,29 @@ async def internet_monitor_loop():
         elif has_net and is_offline:
             is_offline = False
             print("[СЕТЬ] Интернет появился.")
-            try:
-                if client and CHAT_ID:
-                    await client.send_message(CHAT_ID, "всем привет, у меня инета не было")
-            except Exception as e:
-                print(f"Ошибка отправки сообщения о сети: {e}")
 
 def clean_text(text: str) -> str:
     if not text:
         return ""
     text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL)
-    text = re.sub(r'\S*@\S*', '', text)
-    # Фильтрация упоминаний рулетки
-    text = re.sub(r'\.рулетка', '', text, flags=re.IGNORECASE)
+    text = re.sub(r'\S*@\S*', '', text)  # Удаление юзернеймов/почты
     return re.sub(r'\s+', ' ', text).strip()
 
 def process_generated_text(text: str) -> str:
-    """Проверка сгенерированного текста: если есть ссылки или рулетка — посылаем"""
+    """Жесткий фильтр сгенерированного ответа ИИ: предотвращает кик и блокировку"""
     if not text:
         return ""
     
-    # Проверка на ссылки и команды рулетки
+    # 1. Проверка на ссылки
     has_url = bool(re.search(r'(https?://\S+|www\.\S+|\bt\.me/\S+|\b[a-zA-Z0-9.-]+\.(?:ru|com|net|org|io|me)\b)', text, re.IGNORECASE))
-    has_roulette = bool(re.search(r'[\.\/!─\+–\-]?\s*рулетка', text, re.IGNORECASE))
     
-    if has_url or has_roulette:
-        return "Соси хуй чмырь"
+    # 2. Проверка на опасные команды Iris
+    has_iris_danger = bool(IRIS_DANGER_PATTERN.search(text))
+    
+    # 3. Если ИИ попытался выдать команду или ссылку — отменяем отправку полностью
+    if has_url or has_iris_danger:
+        print(f"[БЛОКИРОВКА ИИ] Отфильтровано опасное сообщение: {text}")
+        return ""
         
     return clean_text(text)
 
@@ -159,20 +165,7 @@ async def trigger_sleep_mode():
 
     is_sleeping = True
     print("[ЛИМИТЫ] Сон на 3 часа.")
-    try:
-        if client and CHAT_ID:
-            await client.send_message(CHAT_ID, "Чет спать хочу, я спать, всем пока.")
-    except Exception as e:
-        print(f"Ошибка отправки: {e}")
-
     await asyncio.sleep(SLEEP_DURATION)
-
-    try:
-        if client and CHAT_ID:
-            await client.send_message(CHAT_ID, "ух.. хорошо поспал.. всем привет.")
-    except Exception as e:
-        print(f"Ошибка отправки: {e}")
-
     is_sleeping = False
 
 def analyze_image_with_qwen(image_bytes: bytes, caption_text: str = "") -> tuple[str, bool]:
@@ -192,8 +185,8 @@ def analyze_image_with_qwen(image_bytes: bytes, caption_text: str = "") -> tuple
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": user_content}
             ],
-            temperature=0.7,
-            max_tokens=250,
+            temperature=0.6,
+            max_tokens=150,
         )
         return process_generated_text(completion.choices[0].message.content or ""), False
     except RateLimitError:
@@ -227,7 +220,7 @@ def split_into_chunks(text: str) -> list[str]:
 
 def cleanup_inactive_users():
     current_time = time.time()
-    expired_users = [uid for uid, data in user_memory.items() if current_time - data["last_active"] > 7200]
+    expired_users = [uid for uid, data in user_memory.items() if current_time - data["last_active"] > 3600]
     for uid in expired_users:
         del user_memory[uid]
 
@@ -254,7 +247,6 @@ def get_ai_response(user_id: int, combined_text: str) -> tuple[str, bool]:
 
     temp_history = history + [{"role": "user", "content": combined_text}]
     
-    # Ограничение по лимиту памяти: если превышает MAX_HISTORY_LIMIT, старые сообщения удаляются
     if len(temp_history) > MAX_HISTORY_LIMIT:
         temp_history = temp_history[-MAX_HISTORY_LIMIT:]
 
@@ -264,8 +256,8 @@ def get_ai_response(user_id: int, combined_text: str) -> tuple[str, bool]:
         completion = groq_client.chat.completions.create(
             model=MODEL_NAME,
             messages=messages,
-            temperature=0.7,
-            max_tokens=250,
+            temperature=0.6,
+            max_tokens=150,
         )
         raw_reply = completion.choices[0].message.content or ""
         final_reply = process_generated_text(raw_reply)
@@ -274,7 +266,6 @@ def get_ai_response(user_id: int, combined_text: str) -> tuple[str, bool]:
             history.append({"role": "user", "content": combined_text})
             history.append({"role": "assistant", "content": final_reply})
             
-            # Сохранение с учётом жесткого лимита памяти
             user_memory[user_id]["messages"] = history[-MAX_HISTORY_LIMIT:]
             return final_reply, False
 
@@ -290,7 +281,7 @@ async def send_split_messages(event, full_text: str):
     chunks = split_into_chunks(full_text)
     for i, chunk in enumerate(chunks):
         async with event.client.action(event.chat_id, "typing"):
-            typing_delay = max(1.8, min(len(chunk) * 0.06 + random.uniform(0.5, 1.5), 6.0))
+            typing_delay = max(1.5, min(len(chunk) * 0.05 + random.uniform(0.3, 1.0), 4.0))
             await asyncio.sleep(typing_delay)
             if i == 0:
                 await event.reply(chunk)
@@ -298,13 +289,14 @@ async def send_split_messages(event, full_text: str):
                 await event.client.send_message(event.chat_id, chunk)
 
 async def autonomous_chat_initiator():
+    """Редкая активация бота (раз в 3-6 часов)"""
     while True:
-        await asyncio.sleep(random.randint(1800, 3600))
+        await asyncio.sleep(random.randint(10800, 21600))
         if is_sleeping or is_offline or not client or not CHAT_ID:
             continue
         try:
             messages = await client.get_messages(CHAT_ID, limit=5)
-            chat_context = [f"Участник: {msg.text}" for msg in reversed(messages) if msg.text and not msg.text.startswith(".рулетка")]
+            chat_context = [f"Участник: {msg.text}" for msg in reversed(messages) if msg.text and not IRIS_DANGER_PATTERN.search(msg.text)]
             if not chat_context:
                 continue
 
@@ -335,7 +327,7 @@ def register_telegram_handlers():
             return
 
         sender = await event.get_sender()
-        if not sender:
+        if not sender or getattr(sender, "bot", False):
             return
 
         user_id = sender.id
@@ -343,8 +335,9 @@ def register_telegram_handlers():
         text = event.text or ""
         has_photo = bool(event.photo)
 
-        # Полный игнор любых команд с рулеткой
-        if ".рулетка" in text.lower():
+        # 1. ЗАЩИТА ОТ АБУЗА: Полный игнор любых провокаций Iris и системных команд
+        if IRIS_DANGER_PATTERN.search(text):
+            print(f"[ОБХОД АБУЗА] Игнорируем опасную команду от user_{user_id}: {text}")
             return
 
         if not text and not has_photo:
@@ -360,26 +353,29 @@ def register_telegram_handlers():
                 is_reply_to_me = True
 
         is_mentioned = me.username and f"@{me.username}" in text
-        should_respond = is_reply_to_me or is_mentioned or (random.random() < 0.12)
+        
+        # 2. ОГРАНИЧЕНИЕ ВЛЕЗАНИЯ: Личное обращение — 100%, случайное влезание — 3%
+        should_respond = is_reply_to_me or is_mentioned or (random.random() < 0.03)
+
+        if not should_respond:
+            return
 
         current_time = time.time()
 
-        # Проверка лимита в 10 секунд ДЛЯ КОНКРЕТНОГО ПОЛЬЗОВАТЕЛЯ
-        if should_respond:
-            last_user_time = user_last_message_time.get(user_id, 0)
-            if current_time - last_user_time < COOLDOWN_SECONDS:
-                await event.reply("Подожди, я занят.")
-                return
+        # 3. КУЛДАУН: Игнорируем слишком частые запросы от одного юзера без флуда в ответ
+        last_user_time = user_last_message_time.get(user_id, 0)
+        if current_time - last_user_time < COOLDOWN_SECONDS:
+            return
 
-            # Обновляем время отправки от пользователя
+        # Задержка реакции для естественности
+        await asyncio.sleep(random.uniform(1.8, 3.5))
+
+        if current_time - last_message_time >= COOLDOWN_SECONDS or is_reply_to_me or is_mentioned:
             user_last_message_time[user_id] = current_time
-
-        await asyncio.sleep(2.5)
-
-        if should_respond and (current_time - last_message_time >= COOLDOWN_SECONDS or is_reply_to_me or is_mentioned):
             last_message_time = time.time()
 
-            if text and any(k in text.lower() for k in ["нарисуй", "сгенерируй", "покажи как выглядит", "нарисуй фото"]):
+            # Обработка генерации картинок
+            if text and any(k in text.lower() for k in ["нарисуй", "сгенерируй", "покажи как выглядит"]):
                 async with event.client.action(event.chat_id, "photo"):
                     await asyncio.sleep(random.uniform(2.0, 4.0))
                     img_data = generate_image_pollinations(text)
@@ -390,6 +386,7 @@ def register_telegram_handlers():
                         log_to_file(user_id, username, "Bot", "[GENERATED_IMAGE]")
                         return
 
+            # Обработка входящих фото
             if has_photo:
                 async with event.client.action(event.chat_id, "typing"):
                     photo_bytes = await event.download_media(file=bytes)
@@ -398,11 +395,12 @@ def register_telegram_handlers():
                         asyncio.create_task(trigger_sleep_mode())
                         return
                     if ai_reply:
-                        await asyncio.sleep(random.uniform(1.5, 3.5))
+                        await asyncio.sleep(random.uniform(1.5, 3.0))
                         await event.reply(ai_reply)
                         log_to_file(user_id, username, "Bot", ai_reply)
                         return
 
+            # Текстовый ответ
             if user_id not in user_pending_queue:
                 user_pending_queue[user_id] = []
             user_pending_queue[user_id].append(text)
@@ -446,13 +444,11 @@ async def main():
         else:
             print("[ОШИБКА] Указанная SESSION_STRING недействительна.")
     else:
-        print("[ВНИМАНИЕ] Переменные окружения (API_ID, API_HASH, SESSION_STRING) не заполнены в Render!")
+        print("[ВНИМАНИЕ] Переменные окружения не заполнены!")
 
-    # Запуск Flask в фоновом потоке
     flask_thread = threading.Thread(target=run_flask, daemon=True)
     flask_thread.start()
 
-    # Удержание асинхронного цикла активным
     while True:
         await asyncio.sleep(3600)
 
