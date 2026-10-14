@@ -783,3 +783,29 @@ async def main():
     if API_ID and API_HASH and SESSION_STRING:
         print("[ИНФО] Подключение юзербота через StringSession...")
         client = Telegram
+                client = TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH, loop=bot_loop)
+        await client.connect()
+
+        if await client.is_user_authorized():
+            print("[УСПЕХ] Юзербот успешно авторизован!")
+            register_telegram_handlers()
+            start_bot_tasks()
+        else:
+            print("[ОШИБКА] Указанная SESSION_STRING недействительна.")
+    else:
+        print("[ВНИМАНИЕ] Переменные окружения не заполнены!")
+
+    flask_thread = threading.Thread(target=run_flask, daemon=True)
+    flask_thread.start()
+
+    while True:
+        await asyncio.sleep(3600)
+
+
+if __name__ == "__main__":
+    asyncio.set_event_loop(bot_loop)
+    try:
+        bot_loop.run_until_complete(main())
+    except KeyboardInterrupt:
+        print("Бот остановлен.")
+        save_memory()
